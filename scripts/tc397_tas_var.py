@@ -14,6 +14,7 @@ to ELF addresses and sizes.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -1065,17 +1066,22 @@ def resolve_symbol(elf_path: Path, name: str) -> ElfSymbol:
 
 
 def _load_fast_elfio_resolver():
+    module_path = Path(__file__).resolve().with_name("tc397_elfio_fast.py")
+    if module_path.exists():
+        spec = importlib.util.spec_from_file_location("tc397_elfio_fast", module_path)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(module)
+                return module
+            except Exception:
+                return None
     try:
-        from scripts import tc397_elfio_fast
+        import tc397_elfio_fast
 
         return tc397_elfio_fast
     except Exception:
-        try:
-            import tc397_elfio_fast
-
-            return tc397_elfio_fast
-        except Exception:
-            return None
+        return None
 
 
 class ElfParser:
