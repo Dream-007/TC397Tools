@@ -1,0 +1,27 @@
+{
+  "workspace": "tc397_das_jds.xjrf",
+  "detected_usb_device": {
+    "requested_bus_device": "001/008",
+    "last_seen_bus_device": "001/009",
+    "vendor_id": "058b",
+    "product_id": "0043",
+    "manufacturer": "IFX",
+    "product": "DAS JDS Application Kit TC397 V1.0",
+    "serial": "AK9D8ARF"
+  },
+  "winidea_configuration": {
+    "target": "Infineon 5V TC397 Application Kit",
+    "soc": "TC397XX",
+    "hardware": "IFX_DAS",
+    "hardware_id_in_xjrf": 14,
+    "communication_mode": "USB",
+    "debug_channel": "DAP",
+    "aurix_debug_mode": "DAP_W",
+    "dap_clock_khz": 10000
+  },
+  "notes": [
+    "Linux bus/device numbers are not stable and may change after unplug/replug or WSL restart.",
+    "winIDEA/DAS should discover this JDS by vendor/product and serial, so the workspace intentionally uses IFX_DAS with automatic USB selection.",
+    "The JDS COM interface is the serial port and should not be used as the debug/programming interface."
+  ]
+}
