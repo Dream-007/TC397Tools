@@ -1064,6 +1064,20 @@ def resolve_symbol(elf_path: Path, name: str) -> ElfSymbol:
     return ElfParser(elf_path, include_zero_size=True).get_variable(name)
 
 
+def _load_fast_elfio_resolver():
+    try:
+        from scripts import tc397_elfio_fast
+
+        return tc397_elfio_fast
+    except Exception:
+        try:
+            import tc397_elfio_fast
+
+            return tc397_elfio_fast
+        except Exception:
+            return None
+
+
 class ElfParser:
     """ELF variable parser built on pyelftools."""
 
@@ -1089,6 +1103,7 @@ class ElfParser:
         self._reference_cache: dict[str, ElfVariableReference] = {}
         self._candidate_cu_cache: dict[str, list] = {}
         self._dwarf_variable_die_cache: dict[str, Any] = {}
+        self._fast_elfio_resolver = None
 
     def parse(self, *, force: bool = False) -> ElfVariableTable:
         if force:
@@ -1334,6 +1349,43 @@ class ElfParser:
             byte_count_override=1 if index is not None else alias.size,
         )
 
+    def _fast_elfio_reference(self, expression: str) -> ElfVariableReference | None:
+        fast_module = _load_fast_elfio_resolver()
+        if fast_module is None or not fast_module.available():
+            return None
+        try:
+            if self._fast_elfio_resolver is None:
+                self._fast_elfio_resolver = fast_module.ElfioResolver(self.elf_path)
+            info = self._fast_elfio_resolver.resolve_reference(
+                expression,
+                include_zero_size=self.include_zero_size,
+                include_notype=self.include_notype,
+            )
+        except Exception:
+            return None
+
+        byte_size = int(info["byte_size"])
+        variable_size = int(info["variable_size"])
+        signed = info.get("signed")
+        variable = ElfVariable(
+            name=str(info["base_name"]),
+            address=int(info["address"]),
+            size=variable_size,
+            signed=signed if isinstance(signed, bool) else None,
+            source=str(info["source"]),
+            symbol_type=str(info["symbol_type"]),
+            binding=str(info["binding"]),
+            section_name=str(info["section_name"]),
+            type_name=str(info["type_name"]),
+        )
+        return ElfVariableReference(
+            expression=expression,
+            variable=variable,
+            byte_offset=0,
+            indexed=bool(info["indexed"]),
+            byte_count_override=byte_size,
+        )
+
     def get_variable_reference(self, expression: str) -> ElfVariableReference:
         cached = self._reference_cache.get(expression)
         if cached is not None:
@@ -1343,6 +1395,10 @@ class ElfParser:
         if alias_reference:
             self._reference_cache[expression] = alias_reference
             return alias_reference
+        fast_reference = self._fast_elfio_reference(expression)
+        if fast_reference:
+            self._reference_cache[expression] = fast_reference
+            return fast_reference
         dwarf_field_reference = self._dwarf_field_reference(expression)
         if dwarf_field_reference:
             self._reference_cache[expression] = dwarf_field_reference
