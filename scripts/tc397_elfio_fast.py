@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_LIBRARY = REPO_ROOT / "build" / "libtc397_elfio_resolver.so"
+REPO_ROOT = Path(__file__).parent
+DEFAULT_LIBRARY = REPO_ROOT / "libtc397_elfio_resolver.so"
 
 _lib: ctypes.CDLL | None = None
 _load_error: Exception | None = None
