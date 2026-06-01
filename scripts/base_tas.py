@@ -7,13 +7,14 @@ Features kept here:
 2. regenerate JSON when it does not match the ELF or is older than the ELF;
 3. connect/disconnect TAS;
 4. resolve a full member path or a leaf member name from JSON;
-5. read the resolved address through TAS.
+5. read/write the resolved address through TAS.
 """
 
 from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import subprocess
@@ -38,10 +39,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SO_PATH = REPO_ROOT / "scripts" / "libtc397_elfio_resolver.so"
-ELF_PATH = REPO_ROOT / "Downloads" / "MCU_A.elf"
-JSON_PATH = REPO_ROOT / "build" / "MCU_A.json"
+REPO_ROOT = Path(__file__).parent
+SO_PATH = REPO_ROOT / "libtc397_elfio_resolver.so"
+ELF_PATH = Path('/home/shiheping/QianLiPrj/TC397Tools/Downloads/MCU_A.elf')
+JSON_PATH = Path('/home/shiheping/QianLiPrj/TC397Tools/build/MCU_A.json')
 MAX_MEMBER_DEPTH = 8
 
 DEFAULT_DAS_HOME = "/opt/Tools/DAS/8.3.0"
@@ -55,6 +56,7 @@ DAS_DIO_HOT_ATTACH = 0x00000000
 DAS_AMAP_DEVICE_MIN = 0
 
 DAS_TRA_R = 0x00
+DAS_TRA_W = 0x01
 DAS_TRA_BYTE = 0x00
 DAS_TRA_RW_TRANSACTION = 0x00
 DAS_LC_DEFAULT = 0x00000000
@@ -214,6 +216,57 @@ def _describe_error(error: int) -> str:
     return f"0x{error:08x}" + (f" ({'|'.join(names)})" if names else "")
 
 
+def _parse_int(text: str) -> int:
+    return int(text.replace("_", ""), 0)
+
+
+def _parse_hex_bytes(text: str) -> bytes:
+    raw = text.strip().replace(" ", "").replace("_", "")
+    if raw.startswith("0x"):
+        raw = raw[2:]
+    if len(raw) % 2:
+        raw = "0" + raw
+    return bytes.fromhex(raw)
+
+
+def _value_to_bytes(value: int | bytes | bytearray | str, byte_count: int) -> bytes:
+    if isinstance(value, bytes):
+        data = value
+    elif isinstance(value, bytearray):
+        data = bytes(value)
+    elif isinstance(value, str):
+        int_value = _parse_int(value)
+        data = int_value.to_bytes(byte_count, "little", signed=int_value < 0)
+    else:
+        int_value = int(value)
+        data = int_value.to_bytes(byte_count, "little", signed=int_value < 0)
+    if len(data) != byte_count:
+        raise ValueError(f"value has {len(data)} byte(s), expected {byte_count}")
+    return data
+
+
+def _file_md5(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.md5()
+    with path.open("rb") as file:
+        while True:
+            chunk = file.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _elf_metadata(elf_path: Path) -> dict:
+    stat = elf_path.stat()
+    return {
+        "elf_path": str(elf_path.resolve()),
+        "elf_size": stat.st_size,
+        "elf_mtime_ns": stat.st_mtime_ns,
+        "elf_md5": _file_md5(elf_path),
+        "max_depth": MAX_MEMBER_DEPTH,
+    }
+
+
 def _load_elf_resolver() -> ctypes.CDLL:
     if not SO_PATH.exists():
         raise FileNotFoundError(f"C++ resolver not found: {SO_PATH}")
@@ -243,13 +296,17 @@ def generate_json_from_elf(elf_path: Path = ELF_PATH, json_path: Path = JSON_PAT
     )
     if rc != 0:
         raise RuntimeError(err.value.decode(errors="replace"))
+    with json_path.open("r+", encoding="utf-8") as file:
+        data = json.load(file)
+        data.update(_elf_metadata(elf_path))
+        file.seek(0)
+        json.dump(data, file, separators=(",", ":"))
+        file.truncate()
     return json_path
 
 
-def json_matches_elf(elf_path: Path = ELF_PATH, json_path: Path = JSON_PATH) -> bool:
-    if not elf_path.exists() or not json_path.exists():
-        return False
-    if elf_path.stat().st_mtime > json_path.stat().st_mtime:
+def json_is_usable(json_path: Path = JSON_PATH) -> bool:
+    if not json_path.exists():
         return False
     try:
         with json_path.open("r", encoding="utf-8") as file:
@@ -257,13 +314,27 @@ def json_matches_elf(elf_path: Path = ELF_PATH, json_path: Path = JSON_PATH) -> 
     except (OSError, json.JSONDecodeError):
         return False
     return (
-        Path(str(data.get("elf_path", ""))).resolve() == elf_path.resolve()
-        and int(data.get("max_depth", -1)) == MAX_MEMBER_DEPTH
+        int(data.get("max_depth", -1)) == MAX_MEMBER_DEPTH
         and isinstance(data.get("entries_by_member"), dict)
     )
 
 
+def json_matches_elf(elf_path: Path = ELF_PATH, json_path: Path = JSON_PATH) -> bool:
+    if not elf_path.exists() or not json_path.exists():
+        return False
+    try:
+        with json_path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data.get("entries_by_member"), dict):
+        return False
+    return data.get("elf_md5") == _file_md5(elf_path)
+
+
 def ensure_json_index(elf_path: Path = ELF_PATH, json_path: Path = JSON_PATH) -> Path:
+    if not elf_path.exists() and json_is_usable(json_path):
+        return json_path
     if not json_matches_elf(elf_path, json_path):
         return generate_json_from_elf(elf_path, json_path)
     return json_path
@@ -438,9 +509,34 @@ class DasClient:
             offset += size
         return b"".join(chunks)
 
+    def write(self, address: int, data: bytes) -> None:
+        if not self.port:
+            raise DasError("TAS is not connected")
+        offset = 0
+        while offset < len(data):
+            chunk = data[offset : offset + DAS_MAX_TRANSFER_SIZE]
+            buffer = create_string_buffer(chunk, len(chunk))
+            self._execute_transaction(
+                DAS_TRA_W | DAS_TRA_BYTE | DAS_TRA_RW_TRANSACTION,
+                address + offset,
+                buffer,
+                len(chunk),
+                "write",
+            )
+            offset += len(chunk)
+
     def _read_once(self, address: int, buffer, size: int) -> None:
+        self._execute_transaction(
+            DAS_TRA_R | DAS_TRA_BYTE | DAS_TRA_RW_TRANSACTION,
+            address,
+            buffer,
+            size,
+            "read",
+        )
+
+    def _execute_transaction(self, action: int, address: int, buffer, size: int, verb: str) -> None:
         tx = DasTransaction()
-        tx.action = DAS_TRA_R | DAS_TRA_BYTE | DAS_TRA_RW_TRANSACTION
+        tx.action = action
         tx.addr_map = self.addr_map
         tx.n_bytes = size
         tx.address = address & 0xFFFFFFFF
@@ -463,7 +559,7 @@ class DasClient:
         done = tx_list.transaction[0]
         if error.value or tx_list.status != DAS_LS_OK or done.status != DAS_TS_OK:
             raise DasError(
-                f"read failed: api={_describe_error(error.value)} "
+                f"{verb} failed: api={_describe_error(error.value)} "
                 f"list=0x{tx_list.status:x} tx=0x{done.status:x} "
                 f"tx_error={_describe_error(done.error)}"
             )
@@ -514,9 +610,12 @@ class BaseTas:
         return self.index.resolve(name)
 
     def read_variable(self, name: str, byte_count: int | None = None) -> bytes:
+        info = self.resolve_variable(name)
+        return self.read_variable_info(info, byte_count)
+
+    def read_variable_info(self, info: VariableInfo, byte_count: int | None = None) -> bytes:
         if not self.client:
             raise DasError("TAS is not connected; call connect() first")
-        info = self.resolve_variable(name)
         size = byte_count or info.byte_size
         if size <= 0:
             raise ValueError(f"unknown byte size for {info.name}; pass byte_count")
@@ -524,8 +623,58 @@ class BaseTas:
 
     def read_variable_value(self, name: str, byte_count: int | None = None) -> int:
         info = self.resolve_variable(name)
-        data = self.read_variable(name, byte_count)
+        data = self.read_variable_info(info, byte_count)
         return int.from_bytes(data, "little", signed=bool(info.signed))
+
+    def read_variable_info_value(self, info: VariableInfo, byte_count: int | None = None) -> int:
+        data = self.read_variable_info(info, byte_count)
+        return int.from_bytes(data, "little", signed=bool(info.signed))
+
+    def write_variable(
+        self,
+        name: str,
+        value: int | bytes | bytearray | str,
+        byte_count: int | None = None,
+    ) -> None:
+        info = self.resolve_variable(name)
+        self.write_variable_info(info, value, byte_count)
+
+    def write_variable_info(
+        self,
+        info: VariableInfo,
+        value: int | bytes | bytearray | str,
+        byte_count: int | None = None,
+    ) -> None:
+        if not self.client:
+            raise DasError("TAS is not connected; call connect() first")
+        size = byte_count or info.byte_size
+        if size <= 0:
+            raise ValueError(f"unknown byte size for {info.name}; pass byte_count")
+        self.client.write(info.address, _value_to_bytes(value, size))
+
+    def write_variable_bytes(self, name: str, hex_bytes: str, byte_count: int | None = None) -> None:
+        if not self.client:
+            raise DasError("TAS is not connected; call connect() first")
+        info = self.resolve_variable(name)
+        data = _parse_hex_bytes(hex_bytes)
+        size = byte_count or len(data) or info.byte_size
+        if len(data) != size:
+            raise ValueError(f"value has {len(data)} byte(s), expected {size}")
+        self.client.write(info.address, data)
+
+    def write_variable_info_bytes(
+        self,
+        info: VariableInfo,
+        hex_bytes: str,
+        byte_count: int | None = None,
+    ) -> None:
+        if not self.client:
+            raise DasError("TAS is not connected; call connect() first")
+        data = _parse_hex_bytes(hex_bytes)
+        size = byte_count or len(data) or info.byte_size
+        if len(data) != size:
+            raise ValueError(f"value has {len(data)} byte(s), expected {size}")
+        self.client.write(info.address, data)
 
     def _ensure_tas_server(self) -> None:
         probe = DasClient(
@@ -566,6 +715,11 @@ if __name__ == "__main__":
     print(f"name={info.name} address=0x{info.address:08x} size={info.byte_size} type={info.type_name}")
     try:
         tas.connect()
+        data = tas.read_variable("VehModMngtGlbSafe1UsgModSts", None)
+        value = int.from_bytes(data, "little", signed=bool(info.signed))
+        print(f"bytes={data.hex()} value={value} hex=0x{value:x}")
+        tas.write_variable("VehModMngtGlbSafe1UsgModSts", value + 1)
+        time.sleep(0.1)
         data = tas.read_variable("VehModMngtGlbSafe1UsgModSts", None)
         value = int.from_bytes(data, "little", signed=bool(info.signed))
         print(f"bytes={data.hex()} value={value} hex=0x{value:x}")
