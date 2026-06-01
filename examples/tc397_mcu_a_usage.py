@@ -28,7 +28,7 @@ from scripts.tc397_tas_var import ElfParser, TasTool, Tc397VariableAccess
 
 
 ELF_PATH = REPO_ROOT / "Downloads" / "MCU_A_0527.elf"
-VARIABLE = "kAdapterWriteSignalDoc.flexray"
+VARIABLE = "kAdapterReadSignalDoc.flexray.MobDevRPAReq1MobDevSts"
 
 
 def flash_elf_example() -> None:
@@ -71,15 +71,15 @@ def main() -> None:
         start_time = time.perf_counter()
         old_data = None
         while time.perf_counter() - start_time < 100:
-            new_data = target.read_reference(variable_ref)
+            new_data = target.read_reference_value(variable_ref)
             if new_data != old_data:
-                if len(new_data) <= 8:
-                    new_value = int.from_bytes(new_data, "little", signed=False)
-                    print(f"Read {VARIABLE}: 0x{new_value:02x} ({new_value})")
-                else:
-                    preview = new_data[:32].hex()
-                    suffix = "..." if len(new_data) > 32 else ""
-                    print(f"Read {VARIABLE}: {len(new_data)} bytes {preview}{suffix}")
+                # if len(new_data) <= 8:
+                # new_value = int.from_bytes(new_data, "little", signed=False)
+                print(f"Read {VARIABLE}: 0x{new_data:02x} ({new_data})")
+                # else:
+                #     preview = new_data[:32].hex()
+                #     suffix = "..." if len(new_data) > 32 else ""
+                #     print(f"Read {VARIABLE}: {len(new_data)} bytes {preview}{suffix}")
                 old_data = new_data
             time.sleep(0.5)
 

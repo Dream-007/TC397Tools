@@ -53,6 +53,14 @@ def _library() -> ctypes.CDLL | None:
             ctypes.c_size_t,
         ]
         lib.tc397_elf_resolve_handle.restype = ctypes.c_int
+        lib.tc397_elf_write_member_index.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
+        lib.tc397_elf_write_member_index.restype = ctypes.c_int
         _lib = lib
         return _lib
     except OSError as exc:
@@ -97,6 +105,47 @@ def resolve_reference(
     if rc != 0:
         raise RuntimeError(err.value.decode(errors="replace"))
     return json.loads(out.value.decode())
+
+
+def write_member_index(
+    elf_path: str | Path,
+    json_path: str | Path,
+    *,
+    max_depth: int = 8,
+) -> Path:
+    lib = _library()
+    if lib is None:
+        raise RuntimeError(f"C++ ELFIO resolver is not built: {DEFAULT_LIBRARY}")
+
+    output = Path(json_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    err = ctypes.create_string_buffer(4096)
+    rc = lib.tc397_elf_write_member_index(
+        str(elf_path).encode(),
+        str(output).encode(),
+        int(max_depth),
+        err,
+        len(err),
+    )
+    if rc != 0:
+        raise RuntimeError(err.value.decode(errors="replace"))
+    return output
+
+
+class MemberIndex:
+    def __init__(self, json_path: str | Path) -> None:
+        self.json_path = Path(json_path)
+        with self.json_path.open("r", encoding="utf-8") as file:
+            self.data = json.load(file)
+        self.entries_by_member: dict[str, list[dict[str, Any]]] = self.data.get(
+            "entries_by_member", {}
+        )
+
+    def find(self, member_name: str) -> list[dict[str, Any]]:
+        return list(self.entries_by_member.get(member_name, []))
+
+    def find_expressions(self, member_name: str) -> list[str]:
+        return [str(item["expression"]) for item in self.find(member_name)]
 
 
 class ElfioResolver:

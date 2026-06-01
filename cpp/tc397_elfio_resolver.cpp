@@ -9,10 +9,12 @@
 #include <memory>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace ELFIO;
@@ -20,11 +22,13 @@ using namespace ELFIO;
 namespace {
 
 constexpr uint64_t DW_TAG_array_type = 0x01;
+constexpr uint64_t DW_TAG_class_type = 0x02;
 constexpr uint64_t DW_TAG_compile_unit = 0x11;
 constexpr uint64_t DW_TAG_member = 0x0d;
 constexpr uint64_t DW_TAG_pointer_type = 0x0f;
 constexpr uint64_t DW_TAG_structure_type = 0x13;
 constexpr uint64_t DW_TAG_typedef = 0x16;
+constexpr uint64_t DW_TAG_union_type = 0x17;
 constexpr uint64_t DW_TAG_base_type = 0x24;
 constexpr uint64_t DW_TAG_const_type = 0x26;
 constexpr uint64_t DW_TAG_variable = 0x34;
@@ -77,6 +81,18 @@ struct VariableRef {
     std::string symbol_type;
     std::string binding;
     std::string section_name;
+    std::string type_name;
+};
+
+struct MemberPath {
+    std::string member_name;
+    std::string expression;
+    std::string base_name;
+    uint64_t address = 0;
+    uint64_t byte_offset = 0;
+    uint64_t byte_size = 0;
+    bool signed_known = false;
+    bool is_signed = false;
     std::string type_name;
 };
 
@@ -269,6 +285,64 @@ std::string to_json(const VariableRef& ref) {
     return out.str();
 }
 
+std::string to_json(const MemberPath& item) {
+    std::ostringstream out;
+    out << "{";
+    out << "\"member_name\":\"" << json_escape(item.member_name) << "\",";
+    out << "\"expression\":\"" << json_escape(item.expression) << "\",";
+    out << "\"base_name\":\"" << json_escape(item.base_name) << "\",";
+    out << "\"address\":" << item.address << ",";
+    out << "\"byte_offset\":" << item.byte_offset << ",";
+    out << "\"byte_size\":" << item.byte_size << ",";
+    out << "\"signed\":";
+    if (item.signed_known) {
+        out << (item.is_signed ? "true" : "false");
+    } else {
+        out << "null";
+    }
+    out << ",";
+    out << "\"type_name\":\"" << json_escape(item.type_name) << "\"";
+    out << "}";
+    return out.str();
+}
+
+std::string to_member_index_json(
+    const std::string& elf_path,
+    const std::vector<MemberPath>& items,
+    int max_depth) {
+    std::map<std::string, std::vector<const MemberPath*>> by_member;
+    for (const auto& item : items) {
+        by_member[item.member_name].push_back(&item);
+    }
+
+    std::ostringstream out;
+    out << "{";
+    out << "\"elf_path\":\"" << json_escape(elf_path) << "\",";
+    out << "\"max_depth\":" << max_depth << ",";
+    out << "\"entry_count\":" << items.size() << ",";
+    out << "\"member_count\":" << by_member.size() << ",";
+    out << "\"entries_by_member\":{";
+    bool first_member = true;
+    for (const auto& pair : by_member) {
+        if (!first_member) {
+            out << ",";
+        }
+        first_member = false;
+        out << "\"" << json_escape(pair.first) << "\":[";
+        bool first_item = true;
+        for (const auto* item : pair.second) {
+            if (!first_item) {
+                out << ",";
+            }
+            first_item = false;
+            out << to_json(*item);
+        }
+        out << "]";
+    }
+    out << "}}";
+    return out.str();
+}
+
 std::string symbol_type_name(unsigned char type) {
     switch (type) {
     case STT_NOTYPE: return "STT_NOTYPE";
@@ -421,6 +495,58 @@ public:
         return ref;
     }
 
+    std::vector<MemberPath> build_member_index(size_t max_depth) {
+        std::vector<MemberPath> items;
+        if (!available() || max_depth == 0) {
+            return items;
+        }
+
+        parse_all_cus();
+
+        std::vector<const Die*> variables;
+        variables.reserve(dies.size());
+        for (const auto& pair : dies) {
+            const Die& die = pair.second;
+            if (die.tag == DW_TAG_variable && !name_of(die).empty()) {
+                variables.push_back(&die);
+            }
+        }
+        std::sort(variables.begin(), variables.end(), [](const Die* lhs, const Die* rhs) {
+            return lhs->offset < rhs->offset;
+        });
+
+        std::set<std::string> seen_expressions;
+        for (const Die* variable : variables) {
+            auto root_addr = address_from_location(*variable);
+            if (!root_addr) {
+                continue;
+            }
+            const Die* root_type = resolve_type(ref_attr(*variable, DW_AT_type));
+            if (root_type == nullptr || !is_aggregate_type(root_type)) {
+                continue;
+            }
+
+            std::unordered_set<uint64_t> type_stack;
+            std::string root_name = name_of(*variable);
+            collect_member_paths(
+                root_name,
+                root_name,
+                *root_addr,
+                0,
+                root_type,
+                max_depth,
+                type_stack,
+                seen_expressions,
+                items);
+        }
+
+        std::sort(items.begin(), items.end(), [](const MemberPath& lhs, const MemberPath& rhs) {
+            return std::tie(lhs.member_name, lhs.expression, lhs.address) <
+                   std::tie(rhs.member_name, rhs.expression, rhs.address);
+        });
+        return items;
+    }
+
 private:
     std::vector<uint8_t> info;
     std::vector<uint8_t> abbrev;
@@ -428,6 +554,12 @@ private:
     std::unordered_map<uint64_t, std::map<uint64_t, Abbrev>> abbrev_cache;
     std::unordered_map<uint64_t, Die> dies;
     std::unordered_map<std::string, std::optional<uint64_t>> variable_cache;
+
+    void parse_all_cus() {
+        for (auto& cu : cus) {
+            parse_cu(cu);
+        }
+    }
 
     void scan_cus() {
         size_t off = 0;
@@ -673,6 +805,15 @@ private:
         return it == die.attrs.end() ? "" : it->second.str;
     }
 
+    bool is_aggregate_type(const Die* die) {
+        const Die* resolved = resolve_type(die);
+        if (resolved == nullptr) {
+            return false;
+        }
+        return resolved->tag == DW_TAG_structure_type || resolved->tag == DW_TAG_class_type ||
+               resolved->tag == DW_TAG_union_type;
+    }
+
     std::optional<uint64_t> byte_size(const Die& die) const {
         auto it = die.attrs.find(DW_AT_byte_size);
         if (it == die.attrs.end()) {
@@ -782,6 +923,74 @@ private:
         }
         throw std::runtime_error("unsupported DWARF member location expression");
     }
+
+    void collect_member_paths(
+        const std::string& base_name,
+        const std::string& parent_expression,
+        uint64_t root_address,
+        uint64_t parent_offset,
+        const Die* type_die,
+        size_t depth_remaining,
+        std::unordered_set<uint64_t>& type_stack,
+        std::set<std::string>& seen_expressions,
+        std::vector<MemberPath>& items) {
+        const Die* current_type = resolve_type(type_die);
+        if (current_type == nullptr || !is_aggregate_type(current_type) || depth_remaining == 0) {
+            return;
+        }
+        if (type_stack.find(current_type->offset) != type_stack.end()) {
+            return;
+        }
+
+        type_stack.insert(current_type->offset);
+        for (uint64_t child_off : current_type->children) {
+            const Die* child = get_die(child_off);
+            if (child == nullptr || child->tag != DW_TAG_member) {
+                continue;
+            }
+
+            std::string member_name = name_of(*child);
+            if (member_name.empty()) {
+                continue;
+            }
+
+            uint64_t byte_offset = parent_offset + member_offset(*child);
+            const Die* member_type = resolve_type(ref_attr(*child, DW_AT_type));
+            uint64_t member_size =
+                byte_size(*child).value_or(member_type ? byte_size(*member_type).value_or(0) : 0);
+            std::optional<bool> member_signed = member_type ? signedness(*member_type) : std::nullopt;
+            std::string member_type_name = member_type ? name_of(*member_type) : "";
+            std::string expression = parent_expression + "." + member_name;
+
+            if (seen_expressions.insert(expression).second) {
+                MemberPath item;
+                item.member_name = member_name;
+                item.expression = expression;
+                item.base_name = base_name;
+                item.address = root_address + byte_offset;
+                item.byte_offset = byte_offset;
+                item.byte_size = member_size;
+                item.signed_known = member_signed.has_value();
+                item.is_signed = member_signed.value_or(false);
+                item.type_name = member_type_name;
+                items.push_back(std::move(item));
+            }
+
+            if (member_type != nullptr && is_aggregate_type(member_type)) {
+                collect_member_paths(
+                    base_name,
+                    expression,
+                    root_address,
+                    byte_offset,
+                    member_type,
+                    depth_remaining - 1,
+                    type_stack,
+                    seen_expressions,
+                    items);
+            }
+        }
+        type_stack.erase(current_type->offset);
+    }
 };
 
 std::optional<VariableRef> resolve_symbol(
@@ -872,6 +1081,35 @@ VariableRef resolve_reference(
     throw std::runtime_error("ELF variable not found: " + expression);
 }
 
+void write_member_index_json(
+    const std::string& elf_path,
+    const std::string& json_path,
+    int max_depth) {
+    if (max_depth <= 0) {
+        throw std::runtime_error("max_depth must be greater than zero");
+    }
+
+    elfio reader;
+    if (!reader.load(elf_path)) {
+        throw std::runtime_error("failed to load ELF: " + elf_path);
+    }
+
+    DwarfResolver dwarf(reader);
+    if (!dwarf.available()) {
+        throw std::runtime_error("ELF has no usable DWARF .debug_info/.debug_abbrev");
+    }
+
+    std::vector<MemberPath> items = dwarf.build_member_index(static_cast<size_t>(max_depth));
+    std::ofstream out(json_path, std::ios::binary);
+    if (!out) {
+        throw std::runtime_error("failed to open JSON output: " + json_path);
+    }
+    out << to_member_index_json(elf_path, items, max_depth);
+    if (!out) {
+        throw std::runtime_error("failed to write JSON output: " + json_path);
+    }
+}
+
 class ResolverHandle {
 public:
     explicit ResolverHandle(const std::string& path) {
@@ -956,6 +1194,25 @@ extern "C" void* tc397_elf_open(const char* elf_path, char* err, size_t err_size
 
 extern "C" void tc397_elf_close(void* handle) {
     delete static_cast<ResolverHandle*>(handle);
+}
+
+extern "C" int tc397_elf_write_member_index(
+    const char* elf_path,
+    const char* json_path,
+    int max_depth,
+    char* err,
+    size_t err_size) {
+    try {
+        if (elf_path == nullptr || json_path == nullptr) {
+            throw std::runtime_error("elf_path and json_path are required");
+        }
+        write_member_index_json(elf_path, json_path, max_depth);
+        copy_string("", err, err_size);
+        return 0;
+    } catch (const std::exception& exc) {
+        copy_string(exc.what(), err, err_size);
+        return 1;
+    }
 }
 
 extern "C" int tc397_elf_resolve_handle(
