@@ -309,7 +309,8 @@ std::string to_json(const MemberPath& item) {
 std::string to_member_index_json(
     const std::string& elf_path,
     const std::vector<MemberPath>& items,
-    int max_depth) {
+    int max_depth,
+    const std::string& mcu_version) {
     std::map<std::string, std::vector<const MemberPath*>> by_member;
     for (const auto& item : items) {
         by_member[item.member_name].push_back(&item);
@@ -319,6 +320,13 @@ std::string to_member_index_json(
     out << "{";
     out << "\"elf_path\":\"" << json_escape(elf_path) << "\",";
     out << "\"max_depth\":" << max_depth << ",";
+    out << "\"mcu_version\":";
+    if (mcu_version.empty()) {
+        out << "null";
+    } else {
+        out << "\"" << json_escape(mcu_version) << "\"";
+    }
+    out << ",";
     out << "\"entry_count\":" << items.size() << ",";
     out << "\"member_count\":" << by_member.size() << ",";
     out << "\"entries_by_member\":{";
@@ -1084,7 +1092,8 @@ VariableRef resolve_reference(
 void write_member_index_json(
     const std::string& elf_path,
     const std::string& json_path,
-    int max_depth) {
+    int max_depth,
+    const std::string& mcu_version) {
     if (max_depth <= 0) {
         throw std::runtime_error("max_depth must be greater than zero");
     }
@@ -1104,7 +1113,7 @@ void write_member_index_json(
     if (!out) {
         throw std::runtime_error("failed to open JSON output: " + json_path);
     }
-    out << to_member_index_json(elf_path, items, max_depth);
+    out << to_member_index_json(elf_path, items, max_depth, mcu_version);
     if (!out) {
         throw std::runtime_error("failed to write JSON output: " + json_path);
     }
@@ -1200,13 +1209,18 @@ extern "C" int tc397_elf_write_member_index(
     const char* elf_path,
     const char* json_path,
     int max_depth,
+    const char* mcu_version,
     char* err,
     size_t err_size) {
     try {
         if (elf_path == nullptr || json_path == nullptr) {
             throw std::runtime_error("elf_path and json_path are required");
         }
-        write_member_index_json(elf_path, json_path, max_depth);
+        write_member_index_json(
+            elf_path,
+            json_path,
+            max_depth,
+            mcu_version == nullptr ? "" : mcu_version);
         copy_string("", err, err_size);
         return 0;
     } catch (const std::exception& exc) {
