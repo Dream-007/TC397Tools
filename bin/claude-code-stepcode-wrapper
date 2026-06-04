@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOG_DIR="${CLAUDE_CODE_STEPCODE_LOG_DIR:-/home/shiheping/.stepcode/vscode}"
+mkdir -p "$LOG_DIR"
+printf '[%s] vscode claude wrapper args:' "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_DIR/claude-code-wrapper.log"
+printf ' %q' "$@" >> "$LOG_DIR/claude-code-wrapper.log"
+printf '\n' >> "$LOG_DIR/claude-code-wrapper.log"
+
+# The VS Code extension calls this wrapper as:
+#   wrapper <real-claude-binary> <claude args...>
+# or, on JS fallback builds:
+#   wrapper <node> <cli.js> <claude args...>
+# stepcode already knows how to launch Claude, so discard those launcher args.
+if [[ $# -gt 0 && ( -x "$1" || "$1" == *.js ) ]]; then
+  launcher="$(basename "$1")"
+  shift
+  if [[ ( "$launcher" == "node" || "$launcher" == "nodejs" ) && $# -gt 0 && "$1" == *.js ]]; then
+    shift
+  fi
+fi
+
+exec /home/shiheping/.local/bin/stepcode claude "$@"
