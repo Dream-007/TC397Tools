@@ -1,0 +1,63 @@
+{
+  "generated_at": "2026-06-07T11:33:24",
+  "description": "SigAccess E2E platform-version selection config. Keys are SigAccess platform directories such as P_30T or L3. Edit this file to control which OneTrack model variant is selected for each platform directory.",
+  "platform_key_sources": [
+    "self.input_info.platform",
+    "self.tas.elf_path parent directory under testcase/SigAccess/<platform>/case_helper/MCUA/MCU_A.elf"
+  ],
+  "optional_model_hint_order": [
+    "self.input_info.db_version",
+    "self.input_info.task_data_version",
+    "self.input_info.target_version"
+  ],
+  "platforms": {
+    "L3": {
+      "default_model": "3.0_L3_26R2",
+      "version_rules": [
+        {
+          "name": "3.0_L3_26R2",
+          "model": "3.0_L3_26R2",
+          "match": {
+            "contains": [
+              "26R2",
+              "30L326R2"
+            ],
+            "regex": []
+          }
+        }
+      ]
+    },
+    "P_30T": {
+      "default_model": "3.0_26R2",
+      "version_rules": [
+        {
+          "name": "3.0_26R2",
+          "model": "3.0_26R2",
+          "match": {
+            "contains": [
+              "26R2",
+              "3026R2"
+            ],
+            "regex": []
+          }
+        }
+      ]
+    },
+    "P_G30TU": {
+      "default_model": "L946 26R1",
+      "version_rules": [
+        {
+          "name": "L946 26R1",
+          "model": "L946 26R1",
+          "match": {
+            "contains": [
+              "26R1",
+              "L94626R1"
+            ],
+            "regex": []
+          }
+        }
+      ]
+    }
+  }
+}
