@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-07T11:33:24",
+  "generated_at": "2026-06-08T09:09:12",
   "description": "SigAccess E2E platform-version selection config. Keys are SigAccess platform directories such as P_30T or L3. Edit this file to control which OneTrack model variant is selected for each platform directory.",
   "platform_key_sources": [
     "self.input_info.platform",
