@@ -530,12 +530,32 @@ public:
                 continue;
             }
             const Die* root_type = resolve_type(ref_attr(*variable, DW_AT_type));
+            std::string root_name = name_of(*variable);
+            if (root_name.empty()) {
+                continue;
+            }
+
+            if (seen_expressions.insert(root_name).second) {
+                MemberPath item;
+                item.member_name = root_name;
+                item.expression = root_name;
+                item.base_name = root_name;
+                item.address = *root_addr;
+                item.byte_offset = 0;
+                item.byte_size =
+                    byte_size(*variable).value_or(root_type ? byte_size(*root_type).value_or(0) : 0);
+                std::optional<bool> root_signed = root_type ? signedness(*root_type) : std::nullopt;
+                item.signed_known = root_signed.has_value();
+                item.is_signed = root_signed.value_or(false);
+                item.type_name = root_type ? name_of(*root_type) : "";
+                items.push_back(std::move(item));
+            }
+
             if (root_type == nullptr || !is_aggregate_type(root_type)) {
                 continue;
             }
 
             std::unordered_set<uint64_t> type_stack;
-            std::string root_name = name_of(*variable);
             collect_member_paths(
                 root_name,
                 root_name,
@@ -1001,6 +1021,59 @@ private:
     }
 };
 
+void add_symbol_variables_to_index(
+    const elfio& reader,
+    std::set<std::string>& seen_expressions,
+    std::vector<MemberPath>& items) {
+    for (const auto& sec_ptr : reader.sections) {
+        const section* sec = sec_ptr.get();
+        if (sec->get_type() != SHT_SYMTAB && sec->get_type() != SHT_DYNSYM) {
+            continue;
+        }
+        const_symbol_section_accessor symbols(reader, sec);
+        for (Elf_Xword i = 0; i < symbols.get_symbols_num(); ++i) {
+            std::string name;
+            Elf64_Addr value = 0;
+            Elf_Xword size = 0;
+            unsigned char bind = 0;
+            unsigned char type = 0;
+            Elf_Half section_index = 0;
+            unsigned char other = 0;
+            if (!symbols.get_symbol(i, name, value, size, bind, type, section_index, other)) {
+                continue;
+            }
+            if (name.empty() || section_index == SHN_UNDEF || size == 0) {
+                continue;
+            }
+            if (type != STT_OBJECT && type != STT_COMMON && type != STT_TLS) {
+                continue;
+            }
+            if (!seen_expressions.insert(name).second) {
+                continue;
+            }
+
+            MemberPath item;
+            item.member_name = name;
+            item.expression = name;
+            item.base_name = name;
+            item.address = value;
+            item.byte_offset = 0;
+            item.byte_size = size;
+            item.signed_known = false;
+            item.is_signed = false;
+            item.type_name = "";
+            items.push_back(std::move(item));
+        }
+    }
+}
+
+void sort_member_paths(std::vector<MemberPath>& items) {
+    std::sort(items.begin(), items.end(), [](const MemberPath& lhs, const MemberPath& rhs) {
+        return std::tie(lhs.member_name, lhs.expression, lhs.address) <
+               std::tie(rhs.member_name, rhs.expression, rhs.address);
+    });
+}
+
 std::optional<VariableRef> resolve_symbol(
     const elfio& reader,
     const ParsedExpression& expr,
@@ -1109,6 +1182,13 @@ void write_member_index_json(
     }
 
     std::vector<MemberPath> items = dwarf.build_member_index(static_cast<size_t>(max_depth));
+    std::set<std::string> seen_expressions;
+    for (const auto& item : items) {
+        seen_expressions.insert(item.expression);
+    }
+    add_symbol_variables_to_index(reader, seen_expressions, items);
+    sort_member_paths(items);
+
     std::ofstream out(json_path, std::ios::binary);
     if (!out) {
         throw std::runtime_error("failed to open JSON output: " + json_path);
